@@ -94,7 +94,31 @@ def u_fit(df):
 def u_fun(t):
     return 7.45409110e-07*t**9 - 1.55942700e-04*t**8 + 1.08221950e-02*t**7 - 1.82047991e-05*t**6 - 4.49095364e+01*t**5 + 3.06799073e+03*t**4 - 1.04204413e+05*t**3 + 2.01072271e+06*t**2 - 2.10917709e+07*t + 9.38253864e+07
 
+def optimizer(name):
+    if name == 'SSR':
+        optimizer_ = ps.SSR(
+            alpha=0.05,
+            fit_intercept=True,
+        )
+    if name == 'SR3':
+        optimizer_ = ps.SR3(
+            threshold=0.01,
+            thresholder="L1",
+            trimming_fraction=0.1,
+            max_iter=4000,
+            tol=1e-14,
+        )
+    if name == 'STLSQ':
+        optimizer_ = ps.STLSQ(
+        threshold=0.01,
+        fit_intercept=False,
+    )
+    
+    return optimizer_
+
 def identify_model(df):
+
+    opts = ['SSR', 'SR3', 'STLSQ']
     x_train, x_test = train_test_split(df, train_size=0.8, shuffle=False)
 
     # Entrada: Dados de Teste e Treinamento
@@ -102,91 +126,90 @@ def identify_model(df):
     u_test = x_test.loc[:,["u"]].to_numpy()
 
     # Tempo: Treinamento e Teste
-    t_train = x_train.loc[:, "t"].to_numpy()
-    t_test = x_test.loc[:, "t"].to_numpy()
+    t_train = x_train["t"].to_numpy()
+    t_test = x_test["t"].to_numpy()
 
     # Estados: Dados de Treinamento e Teste
     x_train = x_train.loc[:,["x1", "x2"]].to_numpy()
     x_test = x_test.loc[:,["x1", "x2"]].to_numpy()
 
-    ## CROSS-VLIDATION
-    model = ps.SINDy(t_default=0.01, feature_names = ['x1', 'x2', 'u'])
+    # Initialize custom SINDy library so that we can have x_dot inside it.
+    library_functions = [
+         lambda x : x**3,
+         lambda x : np.sin(x),
+         lambda x : np.cos(x),
+    ]
 
-    param_grid = {
-        "optimizer":[ps.SR3()],
-        "optimizer__threshold":[0.1],
-        "optimizer__thresholder":["L1"],
-        "feature_library":[ps.PolynomialLibrary()],
-        "feature_library__degree":[3]
-    }
+    poly_lib = ps.PolynomialLibrary(degree=2)
+    fourier_lib = ps.FourierLibrary(n_frequencies=1)
+    identity_lib = ps.IdentityLibrary()
+    custom_lib = CustomLibrary(library_functions=library_functions)
 
-    search = GridSearchCV(
-        model,
-        param_grid,
-        cv=TimeSeriesSplit(n_splits=5),
-    )
+    combined_lib = poly_lib + custom_lib
 
-    fit_params = {"t":t_train, "u":u_train, "unbias":True}
+    _, axs = plt.subplots(2*len(opts), 1, sharex=True, figsize=(10, 10))
+    j = 0
+    for opt in opts:
+        print('Otimizador esparso : ' + opt)
+        optimizer_ = optimizer(opt)
 
-    search.fit(x_train, **fit_params)
-    print("Best parameters:", search.best_params_)
-    search.best_estimator_.print()
+        model = ps.SINDy(
+            feature_names = ['x1', 'x2', 'u'],
+            optimizer=optimizer_,
+            feature_library=combined_lib,
+            differentiation_method=ps.SmoothedFiniteDifference(smoother_kws={'window_length':5})
+        )
 
-    x0_test= x_test[0,:]
-    x_model = search.best_estimator_.simulate(x0=x0_test, t=t_test, u=u_test)
-    x0_train= x_train[0,:]
-    x_model_train = search.best_estimator_.simulate(x0=x0_train, t=t_train, u=u_train)
+        model.fit(x_train, u=u_train, t=t_train)
+        model.print()
 
-    print("Predict x1: " + str(r2_score(x_test[:-1,0], x_model[:, 0])) + "\n")
-    print("Predict x2: " + str(r2_score(x_test[:-1,1], x_model[:, 1])) + "\n")
+        # Compute derivatives with a finite difference method, for comparison
+        x_dot_train_computed  = model.differentiate(x_train, dt)
+        x_dot_test_computed  = model.differentiate(x_test, dt)
 
-    print("Trained x1: " + str(r2_score(x_train[:-1,0], x_model_train[:, 0])) + "\n")
-    print("Trained x2: " + str(r2_score(x_train[:-1,1], x_model_train[:, 1])) + "\n")
+        # Predict derivatives using the learned model
+        x_dot_train_predicted  = model.predict(x_train, u=u_train)
+        x_dot_test_predicted  = model.predict(x_test, u=u_test)
 
-    _, ax = plt.subplots(3, 1, figsize=(10,10))
-    ax[0].plot(t_train[:-1], x_model_train[:, 0], label="trained Model", linestyle='dashed',linewidth=2.0)
-    ax[0].plot(t_train, x_train[:, 0], label="train signal", linewidth=.5)
-    ax[0].plot(t_test[:-1], x_model[:, 0], label="tested Model", color="black", linestyle='dashed',linewidth=2.0)
-    ax[0].plot(t_test, x_test[:,0], label="test signal", linewidth=.5)
-    ax[0].legend()
-
-    ax[1].plot(t_train[:-1], x_model_train[:, 1], label="trained Model", linestyle='dashed',linewidth=2.0)
-    ax[1].plot(t_train, x_train[:, 1], label="train signal", linewidth=.5)
-    ax[1].plot(t_test[:-1], x_model[:, 1], label="tested Model", color="black", linestyle='dashed',linewidth=2.0)
-    ax[1].plot(t_test, x_test[:,1], label="test signal", linewidth=.5)
-    ax[1].legend()
-
-    ax[2].plot(df.loc[:, "t"], df.loc[:, "u"], label="u", linestyle='dashed',linewidth=2.0)
-    ax[2].legend()
-
+        for i in range(2):
+            axs[j].plot(t_train, x_dot_train_computed[:, i], 'g', label='trained numerical derivative - ' + opt)
+            axs[j].plot(t_train, x_dot_train_predicted[:, i],'b--', label='trained model prediction - ' + opt)
+            axs[j].plot(t_test, x_dot_test_computed[:, i], 'k', label='tested numerical derivative - ' + opt)            
+            axs[j].plot(t_test, x_dot_test_predicted[:, i],'r--', label='tested model prediction - ' + opt)
+            axs[j].legend(loc='center')
+            axs[j].set(xlabel='t', ylabel='$\dot x_{}$'.format(i+1))
+            j = j + 1
     plt.show()
 
-def graphics(states):
+def graphics(states, flt):
     _, ax = plt.subplots(4, 1, figsize=(10,10))
     
-    ax[0].plot(states['x1'], label='LBA10CF901 - X1')
+    ax[0].plot(states["x1"], label='X1')
+    ax[0].plot(flt["x1"], label='X1 - Filtered')
     ax[0].legend(loc='upper right')
     ax[0].grid(True)
     
-    ax[1].plot(states['x2'], label='JEA10CL901 - X2')
-    #ax[1].plot(np.arange(2800, 3901) ,12.2*np.ones(len(states['x2'])), label='Setpoint')
+    ax[1].plot(states['x2'], label='X2')
+    ax[1].plot(flt['x2'], label='X2 - Filtered')
     ax[1].legend(loc='upper right')
     ax[1].grid(True)
 
-    ax[2].plot(states['u'], label='LAB60CF001A - U Flux')
+    ax[2].plot(states['u'], label='U Flux')
+    ax[2].plot(flt['u'], label='U Flux - Filtered')
     ax[2].grid(True)
     ax[2].legend(loc='upper right')
 
-    ax[3].plot(states['u_corr'], label='LAB60CF901 - U Corrected')
+    ax[3].plot(states['x1'] - states['u'], label='out - in')
+    ax[3].plot(flt['x1'] - flt['u'], label='out - in - Filtered')
     ax[3].legend(loc='upper right')
     ax[3].grid(True)
 
     plt.show()   
 
-X = states(2935, 3000)
-#graphics(X)
+X, flt = states(2920, 4000, True)
+#graphics(X, flt)
 #u_fit(X)
-identify_model(X)
+identify_model(flt)
 
 
 

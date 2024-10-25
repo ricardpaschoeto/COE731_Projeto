@@ -1,13 +1,25 @@
+from tkinter import E
 import pandas as pd
-import datetime
 import numpy as np
 import pysindy as ps
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
-from scipy.optimize import curve_fit
-from scipy import interpolate
+from sklearn.metrics import r2_score
 import scipy.signal
 import pysindy as ps
+
+## Primeira tentativa de Modelao:
+# Estados:
+# Fluxo de Vapor - x1
+# Nível medido - x2
+# Saída y = x2
+# Entrada de Controle u = fluxo de água de alimentação - Vetor de entrada de medidas
+
+## Equação:
+# (x1)' = -115093.218 1 + -42.860 x1 + 18671.568 x2 + 54.333 u + 3.391 x1 x2 + -757.046 x2^2 + -4.341 x2 u
+# (x2)' = -351.479 1 + -0.008 x1 + 58.660 x2 + 0.006 u + -2.443 x2^2
+# y = x2
+
 
 def load_data(path):
     df = pd.read_csv(path)
@@ -20,18 +32,7 @@ def filter(x):
 
     return filtered
 
-def interpolate_data(data, t, tnew):
-    y = data
-    x = t
-    f = interpolate.interp1d(x, y)
-    ynew = f(tnew)
-
-    #plt.plot(x, y, 'o', tnew, ynew, '-')
-    #plt.show()
-
-    return ynew
-
-def data_conditioning(df):
+def data_conditioning(df, filtered):
     dt_ = 0.1
     df.drop(df[df["LBA10CF901"] <= 0.].index, inplace=True)
     df.drop(df[df["JEA10CL901"] <= 0.].index, inplace=True)
@@ -39,32 +40,20 @@ def data_conditioning(df):
     df.drop(df[df["LAB60CF001A"] <= 0.].index, inplace=True)
 
     n = len(df["Data_Hora"])
-    t = np.linspace(0, n*(0.1), num=n)
+    t = np.linspace(0, n*(dt_), num=n)
+    df["Data_Hora"] = t
 
-    #t = np.arange(0, len(df["Data_Hora"])*10, 10)  
-    #tnew = np.arange(t[0], t[-1], dt_)
+    df.rename({"Data_Hora":"t", "LBA10CF901":"x1", "JEA10CL901":"x2", "LAB60CF001A":"u", "LAB60CF901":"u_corr"}, axis='columns', inplace=True)
 
-    #x1 = interpolate_data(df["LBA10CF901"], t, tnew)
-    #x2 = interpolate_data(df["JEA10CL901"], t, tnew)
-    #u =  interpolate_data(df["LAB60CF001A"], t, tnew)
-    #u_corr = interpolate_data(df["LAB60CF901"], t, tnew)
-
-    x1 = df["LBA10CF901"]
-    x2 = df["JEA10CL901"]
-    u =  df["LAB60CF001A"]
-    u_corr = df["LAB60CF901"]
-
-    states = pd.DataFrame(columns = ["t", "x1","x2","u", "u_corr"])
-
-    states["t"] = t
-    states["x1"] = filter(x1)
-    states["x2"] = filter(x2)
-    states["u"] = filter(u)
-    states["u_corr"] = filter(u_corr)
+    if filtered:
+        df["x1"] = filter(df["x1"])
+        df["x2"] = filter(df["x2"])
+        df["u"] = filter(df["u"])
+        df["u_corr"] = filter(df["u_corr"])
     
-    return states
+    return df
 
-def states(tmin, tmax):
+def states(tmin, tmax, filtered):
     df = load_data('data_gv10.csv')
     x = [0,	2,	4,	6,	8,	10,	13,	16,	22,	30,	41,	55,	70,	80,	90,	100]
     y = [0.129,	0.216,	0.267,	0.321,	0.362,	0.398,	0.447,	0.491,	0.569,	0.661,	0.771,	0.897,	1.0,	1.1,	1.16,	1.257]
@@ -77,23 +66,9 @@ def states(tmin, tmax):
 
     X = df.loc[tmin:tmax, ["Data_Hora", "LBA10CF901", "JEA10CL901", "LAB60CF901", "LAB60CF001A"]]
 
-    df_ = data_conditioning(X)
+    states = data_conditioning(X, filtered)
 
-    return  np.round(df_,3)
-
-def u_fit(df):
-    def func(x, a, b, c, d):
-        return a - b*np.exp(-c*(x + d))
-        #return a*x**4 + b*x**3 + c*x**2 + d*x + e
-
-    popt, _ = curve_fit(func, df["t"], df["u"])
-    print(popt)
-    plt.plot(df["t"], df["u"], 'b-', label='data')   
-    plt.plot(df["t"], func(df["t"], *popt), 'g--')
-    plt.show()    
-
-def u_fun(t):
-    return 0.37435684 / (0.0007211 + np.exp(-0.02606472 * t))
+    return  np.round(states,3)
 
 def identify_model(df):
     x_train, x_test = train_test_split(df, train_size=0.8, shuffle=False)
@@ -103,8 +78,8 @@ def identify_model(df):
     u_test = x_test.loc[:,["u"]].to_numpy()
 
     # Tempo: Treinamento e Teste
-    t_train = x_train.loc[:, "t"].to_numpy().reshape((len(x_train),))
-    t_test = x_test.loc[:, "t"].to_numpy().reshape((len(x_test),))
+    t_train = x_train.loc[:, "t"].to_numpy()
+    t_test = x_test.loc[:, "t"].to_numpy()
 
     # Estados: Dados de Treinamento e Teste
     x_train = x_train.loc[:,["x1", "x2"]].to_numpy()
@@ -113,14 +88,38 @@ def identify_model(df):
     optimizer = ps.SR3(threshold=0.1, thresholder="L1")
     poly_library = ps.PolynomialLibrary(degree=2)
 
-    model = ps.SINDy(optimizer=optimizer, feature_library=poly_library, t_default=0.01)
-    model.fit(x_train, u=u_train, t=t_train, quiet=True, unbias=True)    
+    model = ps.SINDy(optimizer=optimizer, feature_library=poly_library, feature_names = ['x1', 'x2', 'u'],t_default=0.01)
+    model.fit(x_train, u=u_train, t=t_train, quiet=True)    
     model.print()
 
+    # # Compute derivatives with a finite difference method, for comparison
+    # x_dot_train_computed  = model.differentiate(x_train, 0.01)
+    # x_dot_test_computed  = model.differentiate(x_test, 0.01)
+
+    # # Predict derivatives using the learned model
+    # x_dot_train_predicted  = model.predict(x_train, u=u_train)
+    # x_dot_test_predicted  = model.predict(x_test, u=u_test)
+
+    # _, axs = plt.subplots(x_test.shape[1], 1, sharex=True, figsize=(7, 9))
+    # for i in range(x_test.shape[1]):
+    #     axs[i].plot(t_train, x_dot_train_computed[:, i], 'k', label='trained numerical derivative')
+    #     axs[i].plot(t_test, x_dot_test_computed[:, i], 'k', label='tested numerical derivative')
+    #     axs[i].plot(t_train, x_dot_train_predicted[:, i],'r--', label='trained model prediction')
+    #     axs[i].plot(t_test, x_dot_test_predicted[:, i],'r--', label='tested model prediction')
+    #     axs[i].legend()
+    #     axs[i].set(xlabel='t', ylabel='$\dot x_{}$'.format(i))
+    # plt.show()
+
     x0_test=x_test[0,:]
-    x_model = model.simulate(x0=x0_test, t=t_test, u=u_test)
+    x_model = model.simulate(x0=x0_test, t=t_test, u=u_test, integrator='solve_ivp')
     x0_train=x_train[0,:]
-    x_model_train = model.simulate(x0=x0_train, t=t_train, u=u_train)
+    x_model_train = model.simulate(x0=x0_train, t=t_train, u=u_train, integrator='solve_ivp')
+
+    print("Predict x1: " + str(r2_score(x_test[:-1,0], x_model[:, 0])) + "\n")
+    print("Predict x2: " + str(r2_score(x_test[:-1,1], x_model[:, 1])) + "\n")
+
+    print("Trained x1: " + str(r2_score(x_train[:-1,0], x_model_train[:, 0])) + "\n")
+    print("Trained x2: " + str(r2_score(x_train[:-1,1], x_model_train[:, 1])) + "\n")
 
     _, ax = plt.subplots(3, 1, figsize=(10,10))
     ax[0].plot(t_train[:-1], x_model_train[:, 0], label="trained Model", linestyle='dashed',linewidth=2.0)
@@ -143,12 +142,11 @@ def identify_model(df):
 def graphics(states):
     _, ax = plt.subplots(4, 1, figsize=(10,10))
     
-    ax[0].plot(states['x1'], label='LBA10CF901 - X1')
+    ax[0].plot(states["x1"], label='LBA10CF901 - X1')
     ax[0].legend(loc='upper right')
     ax[0].grid(True)
     
     ax[1].plot(states['x2'], label='JEA10CL901 - X2')
-    #ax[1].plot(np.arange(2800, 3901) ,12.2*np.ones(len(states['x2'])), label='Setpoint')
     ax[1].legend(loc='upper right')
     ax[1].grid(True)
 
@@ -156,15 +154,14 @@ def graphics(states):
     ax[2].grid(True)
     ax[2].legend(loc='upper right')
 
-    ax[3].plot(states['u_corr'], label='LAB60CF901 - U Corrected')
+    ax[3].plot(states['u'] - states['x1'], label='In - out')
     ax[3].legend(loc='upper right')
     ax[3].grid(True)
 
     plt.show()   
 
-X = states(2925, 3000)
+X = states(2500, 4300, True)
 #graphics(X)
-#u_fit(X)
 identify_model(X)
 
 
