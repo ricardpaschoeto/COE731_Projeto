@@ -5,66 +5,91 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from pysindy.feature_library import CustomLibrary
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import root_mean_squared_error, r2_score
 import pysindy as ps
 import sympy as smp
 from sympy.abc import s,t
-from sklearn.kernel_ridge import KernelRidge
 from scipy.signal import lti, lsim
+from scipy.optimize import curve_fit
+import scipy.signal
 
 ##############################################
 # Class for Extration and transform Data     #
 ##############################################
 class ET():
-    def __init__(self, dt, path, tmin, tmax, normalized=False):    
-        self.dt = dt
-        self.df = pd.read_csv(path)
+    def __init__(self, path, tmin, tmax, normalized=False):    
+        self.df = pd.read_excel('data_gv10.xlsx')
+        self.path = path
         self.tmin = tmin
         self.tmax = tmax
-        self.normalized = normalized 
+        self.normalized = normalized
 
     def data_conditioning(self):
-        x = [0,	2,	4,	6,	8,	10,	13,	16,	22,	30,	41,	55,	70,	80,	90,	100]
-        y = [0.129,	0.216,	0.267,	0.321,	0.362,	0.398,	0.447,	0.491,	0.569,	0.661,	0.771,	0.897,	1.0,	1.1,	1.16,	1.257]
-
-        # # Operações sobre os estados so sistema (pré-processamneto e ajustes)
-        K_pressure =  np.polyfit(x,y,4)
-        press_corr01 = np.polyval(K_pressure,  self.df['LBA10CP001'])*self.df['LBA10CF001A']
-        press_corr02 = np.polyval(K_pressure,  self.df['LBA10CP951A'])*self.df['LBA10CF001B']
-        self.df['LBA10CF901'] = (press_corr01 + press_corr02)/2.0
-
-        n = len(self.df["Data_Hora"])
-        t = np.linspace(0, n*self.dt, num=n)
-        self.df["Data_Hora"] = t
+        cols = self.df.columns.values
+        t = self.df[cols[0]]
 
         data = {
-                'x1':self.df['LBA10CF001A'],
-                'x2':self.df['LBA10CP951A'],
-                'u_hp':self.df['LAB60CF001A'],
-                'u_hp_corr':self.df['LAB60CF901'],
-                'x1_corr':self.df['LBA10CF901']          
+                'd':self.df[cols[2]], # LBA10CF001A
+                'u':self.df[cols[4]] # LBA60CF001A
                 }
 
         df_processed = pd.DataFrame(data)
         df_time_col = pd.DataFrame({'t': t})
-        df_y_col = pd.DataFrame({'y': self.df['JEA10CL901']})
+        df_x_col = pd.DataFrame({'x': self.df[cols[3]]}) # JEA10CL951A
+        df_processed = pd.concat([df_processed, df_x_col], axis=1)
         if self.normalized:
             scaler = MinMaxScaler()
-            df_processed = pd.DataFrame(scaler.fit_transform(df_processed), columns= ['x1', 'x2', 'u_hp', 'u_hp_corr', 'x1_corr'])        
-            
-        df_processed = pd.concat([df_processed, df_time_col, df_y_col], axis=1)
-        df_sliced = df_processed.loc[self.tmin:self.tmax, ['t', 'x1', 'x2', 'y', 'u_hp', 'u_hp_corr', 'x1_corr']]
+            df_processed = pd.DataFrame(scaler.fit_transform(df_processed), columns= ['d', 'u', 'x'])
 
-        return df_sliced
+        df_processed = pd.concat([df_processed, df_time_col], axis=1)
+        df_processed['t'] = pd.to_datetime(df_processed['t'], format='%d/%m/%Y  %H:%M:%S')   
+        if self.tmax != 0:
+            df_processed = df_processed.loc[self.tmin:self.tmax, ['t', 'd', 'u', 'x']]
+
+        # Sinal Filtrado
+        df_processed['d'] = self.filtering(df_processed['d'], 3, 0.01)
+        df_processed['u'] = self.filtering(df_processed['u'], 3, 0.01)
+        df_processed['x'] = self.filtering(df_processed['x'], 3, 0.0015)
+
+        # Média móvel
+        df_processed['d'] = df_processed['d'].rolling(window=3).mean()
+        df_processed['u'] = df_processed['u'].rolling(window=3).mean()
+        df_processed['x'] = df_processed['x'].rolling(window=1).mean()
+
+        df_processed = df_processed.dropna(axis=0)
+        
+        return df_processed
+
+    def filtering(self, data, N, Wn):
+        b, a = scipy.signal.butter(N, Wn)
+        filtered = scipy.signal.filtfilt(b, a, data)
+
+        return filtered
+
+    def graphics(self, df):
+        _, ax = plt.subplots(3, 1, figsize=(10,10))
+        
+        ax[0].plot(df['t'], df["d"], label='Steam Flux')
+        ax[0].legend(loc='upper right')
+        ax[0].grid(True)
+
+        ax[1].plot(df['t'], df["u"], label='Main feedwater')
+        ax[1].legend(loc='upper right')
+        ax[1].grid(True)
+
+        ax[2].plot(df['t'], df['x'], label='Level')
+        ax[2].legend(loc='upper right')
+        ax[2].grid(True)
+
+        plt.show()
 
 ######################################################
 # Class for Simulate the Dynamics of Steam generator #
 # used in the paper - "Level Control in the Steam    #
 # Generator of a Nuclear Power Plant"                #
 ######################################################
-class Steam(ET):
-    def __init__(self, dt, path, tmin, tmax, normalized):
-        super().__init__(dt, path, tmin, tmax, normalized)
+class SteamGenerator(ET):
+    def __init__(self, path, tmin, tmax, normalized=False):
+        super().__init__(path, tmin, tmax, normalized)
         self.df = super().data_conditioning()
         self.Tn = np.array([5.14, 8.00, 9.00, 6.29, 5.71, 5.71, 5.71])
         self.Fg = np.array([13.00, 18.00, 10.00, 4.00, 4.00, 4.00, 4.00])
@@ -75,10 +100,11 @@ class Steam(ET):
 
     def ss_sim(self):
         # Define system matrices
-        A = np.array([[0, 0, 0, 1/self.Tn[6]], [0, -1/self.Th[6], 0, -1/self.Tn[6]],[0,  0, -1/self.Tg, 0],[0, 0, 0, -1/self.tau[6]]])
-        B = np.array([0, 0, 0, 1/self.tau[6]]).reshape((4,1))
-        F = np.array([-1/self.Tn[6], 0, (1 + self.Fg[6])/self.Tn[6], 0]).reshape((4,1))
-        C = np.array([[1, 1, 1, 0],[self.Tn[6]/self.Tint, 0, 0, self.tau[6]/self.Tint]])
+        ii = 6
+        A = np.array([[0, 0, 0, 1/self.Tn[ii]], [0, -1/self.Th[ii], 0, -1/self.Tn[ii]],[0,  0, -1/self.Tg, 0],[0, 0, 0, -1/self.tau[ii]]])
+        B = np.array([0, 0, 0, 1/self.tau[ii]]).reshape((4,1))
+        F = np.array([-1/self.Tn[ii], 0, (1 + self.Fg[ii])/self.Tn[ii], 0]).reshape((4,1))
+        C = np.array([[1, 1, 1, 0],[self.Tn[ii]/self.Tint, 0, 0, self.tau[ii]/self.Tint]])
         B_dist = np.hstack((B,F))
         D = np.zeros((C.shape[0],B_dist.shape[1]))
 
@@ -92,7 +118,7 @@ class Steam(ET):
         u = self.df['u_hp'].values
         d = self.df['x1'].values
         t = self.df['t'].values
-        y_real = self.df['y'].values
+        y_real = self.df['x'].values
         U = np.vstack((u,d)).T
 
         # Initial Condition
@@ -100,7 +126,6 @@ class Steam(ET):
 
         # Simulate the system response
         t_out, y_out, x_out = lsim(sys, U=U, T=t, X0=x0)
-        yout_normalized = (y_out - np.min(y_out))/(np.max(y_out) - np.min(y_out))
         
         # Plot the results
         _, ax = plt.subplots(4, 1, figsize=(10,10))
@@ -114,51 +139,54 @@ class Steam(ET):
         ax[3].legend(loc='upper right')
         plt.show()
 
-    def internal_level_rates(self, w, st, tin):
+    def internal_level_rates(self):
         nge = []
         ngl = []
-        qgv_list = []
-        qef_list = []
+        qgv = []
+        qef = []
 
-        for ii in range(len(self.tau)):
+        ii = 6
+        Hgv = (1/(self.Tn[ii]*s)) * (1 - self.Fg[ii]*self.Tg*s)/(1 + self.Tg*s)
+        Hef = (1/(self.Tn[ii]*s)) * (1/(self.Th[ii]*self.tau[ii]*s**2 + (self.Th[ii] + self.tau[ii])*s + 1))
 
-            water, steam = w, st
+        hgv = smp.inverse_laplace_transform(Hgv, s, t)
+        hgv_time  = [hgv.subs({t:tv}) for tv in self.df['t'].values]
+        hef = smp.inverse_laplace_transform(Hef, s, t)
+        hef_time  = [hef.subs({t:tv}) for tv in self.df['t'].values]
 
-            Qgv = (1/(self.Tn[ii]*s)) * (1 - self.Fg[ii]*self.Tg*s)/(1 + self.Tg*s)
-            Qef = (1/(self.Tn[ii]*s)) * (1/(self.Th[ii]*self.tau[ii]*s**2 + (self.Th[ii] + self.tau[ii])*s + 1))
+        f1 = np.convolve(hgv_time, self.df['x1'].values, mode='same')
+        f2 = np.convolve(hef_time, self.df['u_hp'].values, mode='same')       
 
-            qgv = smp.inverse_laplace_transform(Qgv, s, t)
-            qgv_time  = [qgv.subs({t:tv}) for tv in tin.values]
-            qef = smp.inverse_laplace_transform(Qef, s, t)
-            qef_time  = [qef.subs({t:tv}) for tv in tin.values]
+        qgv.append(f1)
+        qef.append(f2)
 
-            f1 = np.convolve(qgv_time, steam, mode='same')        
-            f2 = np.convolve(qef_time, water, mode='same')        
+        nge_v = f2 - f1     
 
-            qgv_list.append(qgv_time)
-            qef_list.append(qef_time)
+        Hgl = (1/(self.Tint*s))
+        hgl = smp.inverse_laplace_transform(Hgl, s, t)
+        hgl_time = [hgl.subs({t:tv}) for tv in self.df['t'].values] 
+        ngl_v = np.convolve(hgl_time, (self.df['u_hp'].values - self.df['x1'].values), mode='same')             
 
-            nge_v = f2 - f1     
+        nge.append(nge_v)
+        ngl.append(ngl_v)
 
-            Ngl = (1/(self.Tint*s))
-            ngl_t = smp.inverse_laplace_transform(Ngl, s, t)
-            ngl_v_conv = [ngl_t.subs({t:tv}) for tv in tin.values] 
-            ngl_v = np.convolve(ngl_v_conv, (water - steam), mode='same')               
+        return nge, ngl, qef, qgv
 
-            nge.append(nge_v)
-            ngl.append(ngl_v)
+    def plot_levels(self, nge, f1, f2, df):
+        _, ax = plt.subplots(6, 1, figsize=(10,10))
 
-        return nge, ngl, qef_list, qgv_list
-
-    def plot_levels(self, nge, ngl):
-        _, ax = plt.subplots(7, 2, figsize=(10,10))
-        ii = 0
-        for lvl1, lvl2 in zip(nge, ngl):
-            ax[ii, 0].plot(lvl1, label='nge')
-            ax[ii, 1].plot(lvl2, label='ngl')
-            ax[ii, 0].grid(True)
-            ax[ii, 1].grid(True)
-            ii = ii + 1
+        ax[0].plot(nge[0], label='level')
+        ax[0].legend()
+        ax[1].plot(df['y'], label='measured level')
+        ax[1].legend()
+        ax[2].plot(df['u_hp'], label='water')
+        ax[2].legend()
+        ax[3].plot(df['x1'], label='steam')
+        ax[3].legend()
+        ax[4].plot(f1, label='qef')
+        ax[4].legend()
+        ax[5].plot(f2, label='qgv')
+        ax[5].legend()
 
         plt.show()
 
@@ -167,15 +195,15 @@ class Steam(ET):
 # generated by data using SINDyc                           # 
 ############################################################  
 class Model(ET):
-    # Fluxo de Vapor - x1                                      
-    # Pressão de Vapor principal - x2                          
-    # Entrada de Controle u_hp = fluxo de água de alimentação  
-    # Pertubação u_hp = fluxo de água de alimentação corrigido 
+
+    # Nível (narrow range) - x1                                      
+    # Entrada de Controle u = fluxo de água de alimentação  
+    # Pertubação d = fluxo de vapor principal 
     # e realimentado no controle                               
     # Saída y = Nível medido
                                        
-    def __init__(self, dt, path, tmin, tmax, normalized):
-        super().__init__(dt, path, tmin, tmax, normalized)
+    def __init__(self, path, tmin, tmax, normalized=False):
+        super().__init__(path, tmin, tmax, normalized)
         self.df = super().data_conditioning()
 
     def optimizer(self, name):
@@ -187,7 +215,7 @@ class Model(ET):
         if name == 'SR3':
             optimizer_ = ps.SR3(
                 threshold=0.01,
-                thresholder="L1",
+                thresholder="L2",
                 trimming_fraction=0.1,
                 max_iter=4000,
                 tol=1e-14,
@@ -201,25 +229,26 @@ class Model(ET):
         return optimizer_
 
     def identify_y(self):
-        model = KernelRidge(alpha=0.1, kernel='laplacian', gamma=0.1)
-        model.fit(self.df['t'].values.reshape(-1,1), self.df['y'].values)
+        def func(X, a, b, c):
+            x, y, z = X
+            return a * np.exp(-b * x) + c * (y - z)
 
-        y_pred = model.predict(self.df['u_hp'].values.reshape(-1,1))
+        Xdata = np.vstack((range(len(self.df['t'])), self.df['d'], self.df['u']))
+        popt, _ = curve_fit(func, Xdata, self.df['x'])
+        print("Optimal parameters:", popt)
 
-        # Evaluate the model
-        mse = root_mean_squared_error(self.df['y'], y_pred)
-        r2 = r2_score(self.df['y'], y_pred)
+        # Generate fitted data
+        zfit = func(Xdata, *popt)
 
-        print(f"Mean Squared Error: {mse:.2f}")
-        print(f"R^2 Score: {r2:.2f}")
-
-        # Plot the results
-        plt.scatter(self.df['t'], self.df['y'], color='blue', label='Actual')
-        plt.plot(self.df['t'], y_pred, color='red', linewidth=2, label='Predicted')
-        plt.xlabel('X')
-        plt.ylabel('y')
+        # Plot the original data and the fitted data
+        plt.figure(figsize=(10, 6))
+        plt.scatter(self.df['t'], self.df['x'], label='Data')
+        plt.plot(self.df['t'], zfit, label='Fitted curve', color='red')
+        plt.xlabel('t')
+        plt.ylabel('z')
         plt.legend()
-        plt.show()
+        plt.title('Multivariable Curve Fitting')
+        plt.show()      
 
     def identify_model(self):
 
@@ -227,19 +256,17 @@ class Model(ET):
         x_train, x_test = train_test_split(self.df, train_size=0.8, shuffle=True)
 
         # Entrada: Dados de Teste e Treinamento
-        u_train = x_train.loc[:,["u_hp"]].to_numpy()
-        u_test = x_test.loc[:,["u_hp"]].to_numpy()
+        du_train = x_train.loc[:,["d", "u"]].to_numpy()
+        du_test = x_test.loc[:,["d", "u"]].to_numpy()
 
         # X: Dados de Treinamento e Teste
-        xs_train =  x_train.loc[:,["x1", "x2"]].to_numpy()
-        xs_test = x_test.loc[:,["x1", "x2"]].to_numpy()
+        xs_train =  x_train.loc[:,["x"]].to_numpy()
+        xs_test = x_test.loc[:,["x"]].to_numpy()
 
         # Initialize custom SINDy library so that we can have x_dot inside it.
         library_functions = [
-            lambda x : x,
             lambda x : x ** 2,
-            lambda x : np.sin(x),
-            lambda x : np.cos(x),
+            lambda x : x,
         ]
 
         feature_libs = [
@@ -255,22 +282,21 @@ class Model(ET):
 
             for lib in feature_libs:
                 model = ps.SINDy(
-                    feature_names = ["x1", "x2", "u"],
+                    feature_names = ["x", "d", "u"],
                     optimizer=optimizer_,
                     feature_library=lib,
-                    differentiation_method=ps.SmoothedFiniteDifference(smoother_kws={'window_length':11})
+                    differentiation_method=ps.SmoothedFiniteDifference(smoother_kws={'window_length':5})
                 )
 
                 print(opt, lib)
-                model.fit(x=xs_train, u=u_train)
+                model.fit(x=xs_train, u=du_train)
                 model.print()
-                # Compare SINDy-predicted derivatives with finite difference derivatives
-                print("Model score: %f" % model.score(x=xs_test, u=u_test))
-                print('=========================')
-
                 # # Compute derivatives with a finite difference method, for comparison
                 # x_dot_train_computed  = model.differentiate(xs_train, dt)
-                # x_dot_test_computed  = model.differentiate(xs_test, dt)
+                x_dot_test_computed  = model.differentiate(xs_test, 0.01)
+                # Compare SINDy-predicted derivatives with finite difference derivatives
+                print("Model score: %f" % model.score(x=xs_test, u=du_test, x_dot=x_dot_test_computed))
+                print('=========================')
 
                 # # Predict derivatives using the learned model
                 # x_dot_train_predicted  = model.predict(xs_train, u=u_train)
@@ -285,34 +311,19 @@ class Model(ET):
                 #     axs.set(xlabel='t', ylabel='$\dot x_{}$'.format(i+1))
                 # plt.show()
 
-    def graphics(self):
-        _, ax = plt.subplots(5, 1, figsize=(10,10))
-        
-        ax[0].plot(self.df["x1"], label='Steam Flux')
-        ax[0].legend(loc='upper right')
-        ax[0].grid(True)
-
-        ax[1].plot(self.df["x2"], label='Steam Pressure')
-        ax[1].legend(loc='upper right')
-        ax[1].grid(True)
-
-        ax[2].plot(self.df['y'], label='Level')
-        ax[2].legend(loc='upper right')
-        ax[2].grid(True)
-
-        ax[3].plot(self.df['u_hp'], label='Water flux')
-        ax[3].grid(True)
-        ax[3].legend(loc='upper right')
-
-        ax[4].plot(self.df['u_hp_corr'], label='Water Flux - corrected')
-        ax[4].legend(loc='upper right')
-        ax[4].grid(True)
-
-        plt.show()
-
 def main():
-    steam = Steam(0.01, 'data_gv10.csv', 2500, 4200, True)
-    steam.ss_sim()
+    tmin = 11000
+    tmax = 23000
+    # et = ET('data_gv10.csv', tmin, tmax, True)
+    # df = et.data_conditioning()
+    # et.graphics(df)
+    # nge, _, qef, qgv = sg.internal_level_rates()
+    # sg.plot_levels(nge, qef[0], qgv[0], sg.df)
+    model = Model('data_gv10.csv', tmin, tmax, True)
+    # model.df['u_hp'] = np.array(qef[0], dtype=float)
+    # model.df['x1'] = np.array(qgv[0], dtype=float)
+    # model.df['y'] = np.array(nge[0], dtype=float)
+    model.identify_model()
 
 if __name__ == "__main__":
     main()
