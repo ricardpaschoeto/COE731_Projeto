@@ -207,23 +207,25 @@ class Model(ET):
         self.df = super().data_conditioning()
 
     def optimizer(self, name):
-        if name == 'SSR':
-            optimizer_ = ps.SSR(
-                alpha=0.05,
-                fit_intercept=True,
-            )
+        optimizer_ = None
+        if name == 'SSR':ps.SSR(
+            alpha=0.01,
+            normalize_columns=True,
+            max_iter=20,
+        )
         if name == 'SR3':
             optimizer_ = ps.SR3(
                 threshold=0.01,
                 thresholder="L2",
-                trimming_fraction=0.1,
-                max_iter=4000,
-                tol=1e-14,
+                trimming_fraction=0,
+                max_iter=30,
+                tol=1e-8,
             )
         if name == 'STLSQ':
             optimizer_ = ps.STLSQ(
             threshold=0.01,
             fit_intercept=False,
+            alpha=0.01,
         )
         
         return optimizer_
@@ -231,9 +233,9 @@ class Model(ET):
     def identify_y(self):
         def func(X, a, b, c):
             x, y, z = X
-            return a * np.exp(-b * x) + c * (y - z)
+            return a * np.exp(-b * (x - y)) + c * z
 
-        Xdata = np.vstack((range(len(self.df['t'])), self.df['d'], self.df['u']))
+        Xdata = np.vstack((range(len(self.df['x'])), self.df['d'], self.df['u']))
         popt, _ = curve_fit(func, Xdata, self.df['x'])
         print("Optimal parameters:", popt)
 
@@ -265,13 +267,15 @@ class Model(ET):
 
         # Initialize custom SINDy library so that we can have x_dot inside it.
         library_functions = [
+            lambda x : x ** 3,
+            lambda x : np.exp(x),
             lambda x : x ** 2,
             lambda x : x,
         ]
 
         feature_libs = [
             CustomLibrary(library_functions=library_functions),
-            ps.PolynomialLibrary(degree=2), 
+            ps.PolynomialLibrary(degree=3), 
             ps.FourierLibrary(n_frequencies=1), 
             ps.IdentityLibrary()
         ]
@@ -285,31 +289,33 @@ class Model(ET):
                     feature_names = ["x", "d", "u"],
                     optimizer=optimizer_,
                     feature_library=lib,
-                    differentiation_method=ps.SmoothedFiniteDifference(smoother_kws={'window_length':5})
+                    differentiation_method=ps.FiniteDifference(order=1)
                 )
 
                 print(opt, lib)
                 model.fit(x=xs_train, u=du_train)
                 model.print()
-                # # Compute derivatives with a finite difference method, for comparison
-                # x_dot_train_computed  = model.differentiate(xs_train, dt)
-                x_dot_test_computed  = model.differentiate(xs_test, 0.01)
-                # Compare SINDy-predicted derivatives with finite difference derivatives
-                print("Model score: %f" % model.score(x=xs_test, u=du_test, x_dot=x_dot_test_computed))
+
+                print("Model score: %f" % model.score(x=xs_test, u=du_test))
                 print('=========================')
 
-                # # Predict derivatives using the learned model
-                # x_dot_train_predicted  = model.predict(xs_train, u=u_train)
-                # x_dot_test_predicted  = model.predict(xs_test, u=u_test)
+                # # Compute derivatives with a finite difference method, for comparison
+                x_dot_train_computed  = model.differentiate(xs_train, 0.01)
+                x_dot_test_computed  = model.differentiate(xs_test, 0.01)
 
-                # for i in range(2):
-                #     axs.plot(x_dot_train_computed[:, i], 'g', label='trained numerical derivative - ' + opt)
-                #     axs.plot(x_dot_train_predicted[:, i],'b--', label='trained model prediction - ' + opt)
-                #     axs.plot(x_dot_test_computed[:, i], 'k', label='tested numerical derivative - ' + opt)            
-                #     axs.plot(x_dot_test_predicted[:, i],'r--', label='tested model prediction - ' + opt)
-                #     axs.legend(loc='center')
-                #     axs.set(xlabel='t', ylabel='$\dot x_{}$'.format(i+1))
-                # plt.show()
+                # Compare SINDy-predicted derivatives with finite difference derivatives
+                # Predict derivatives using the learned model
+                x_dot_train_predicted  = model.predict(xs_train, u=du_train)
+                x_dot_test_predicted  = model.predict(xs_test, u=du_test)
+
+                for i in range(1):
+                    axs.plot(x_dot_train_computed[:, i], 'g', label='trained numerical derivative - ' + opt)
+                    axs.plot(x_dot_train_predicted[:, i],'b--', label='trained model prediction - ' + opt)
+                    axs.plot(x_dot_test_computed[:, i], 'k', label='tested numerical derivative - ' + opt)            
+                    axs.plot(x_dot_test_predicted[:, i],'r--', label='tested model prediction - ' + opt)
+                    axs.legend(loc='center')
+                    axs.set(xlabel='t', ylabel='$\dot x_{}$'.format(i+1))
+                plt.show()
 
 def main():
     tmin = 11000
@@ -320,10 +326,7 @@ def main():
     # nge, _, qef, qgv = sg.internal_level_rates()
     # sg.plot_levels(nge, qef[0], qgv[0], sg.df)
     model = Model('data_gv10.csv', tmin, tmax, True)
-    # model.df['u_hp'] = np.array(qef[0], dtype=float)
-    # model.df['x1'] = np.array(qgv[0], dtype=float)
-    # model.df['y'] = np.array(nge[0], dtype=float)
-    model.identify_model()
+    model.identify_y()
 
 if __name__ == "__main__":
     main()
