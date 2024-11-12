@@ -324,7 +324,7 @@ def main():
     # df = et.data_conditioning()
     # et.graphics(df)
     # nge, _, qef, qgv = sg.internal_level_rates()
-    # sg.plot_levels(nge, qef[0], qgv[0], sg.df)
+    sg.plot_levels(nge, qef[0], qgv[0], sg.df)
     model = Model('data_gv10.csv', tmin, tmax, True)
     model.identify_y()
 
