@@ -208,7 +208,8 @@ class Model(ET):
 
     def optimizer(self, name):
         optimizer_ = None
-        if name == 'SSR':ps.SSR(
+        if name == 'SSR':
+            optimizer_ = ps.SSR(
             alpha=0.01,
             normalize_columns=True,
             max_iter=20,
