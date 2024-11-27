@@ -269,7 +269,7 @@ class Model(ET):
 
         # Initialize custom SINDy library so that we can have x_dot inside it.
         library_functions = [
-            lambda x : np.exp(x),
+            lambda x : np.exp(-x),
             lambda x : x,
         ]
 
@@ -300,22 +300,18 @@ class Model(ET):
                 print('=========================')
 
                 # # Compute derivatives with a finite difference method, for comparison
-                x_dot_train_computed  = model.differentiate(xs_train, 0.01)
-                x_dot_test_computed  = model.differentiate(xs_test, 0.01)
+                x_dot_test_computed  = model.differentiate(xs_test, 1)
 
                 # Compare SINDy-predicted derivatives with finite difference derivatives
                 # Predict derivatives using the learned model
-                # x_dot_train_predicted  = model.predict(xs_train, u=du_train)
-                # x_dot_test_predicted  = model.predict(xs_test, u=du_test)
+                x_dot_test_predicted  = model.predict(xs_test, u=du_test)
 
-                # for i in range(1):
-                #     axs.plot(x_dot_train_computed[:, i], 'g', label='trained numerical derivative - ' + opt)
-                #     axs.plot(x_dot_train_predicted[:, i],'b--', label='trained model prediction - ' + opt)
-                #     axs.plot(x_dot_test_computed[:, i], 'k', label='tested numerical derivative - ' + opt)            
-                #     axs.plot(x_dot_test_predicted[:, i],'r--', label='tested model prediction - ' + opt)
-                #     axs.legend(loc='center')
-                #     axs.set(xlabel='t', ylabel='$\dot x_{}$'.format(i+1))
-                # plt.show()
+                fig, axs = plt.subplots(xs_test.shape[1], 1, sharex=True, figsize=(7, 9))
+                axs.plot(x_dot_test_computed[:, 0], "k", label="numerical derivative")
+                axs.plot(x_dot_test_predicted[:, 0], "r--", label="model prediction")
+                axs.legend()
+                axs.set(xlabel="t", ylabel=r"$\dot x_{}$".format(0))
+                plt.show()
 
 def main():
     tmin = 11000
