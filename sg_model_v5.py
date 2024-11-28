@@ -275,15 +275,16 @@ class Model(ET):
 
         feature_libs = [
             CustomLibrary(library_functions=library_functions),
-            ps.PolynomialLibrary(degree=2), 
+            ps.PolynomialLibrary(degree=2, include_bias=False), 
             ps.FourierLibrary(n_frequencies=1), 
             ps.IdentityLibrary()
         ]
 
         _, axs = plt.subplots(1, 1, sharex=True, figsize=(10, 10))
+        best_score = 0.
+        best_model = None
         for opt in opts:
             optimizer_ = self.optimizer(opt)
-
             for lib in feature_libs:
                 model = ps.SINDy(
                     feature_names = ["x", "d", "u"],
@@ -296,22 +297,26 @@ class Model(ET):
                 model.fit(x=xs_train, u=du_train)
                 model.print()
 
-                print("Model score: %f" % model.score(x=xs_test, u=du_test))
+                score = model.score(x=xs_test, u=du_test)
+                print("Model score: %f" % score)
                 print('=========================')
+                if best_score < score:
+                    best_score = score
+                    best_model = model
 
-                # # Compute derivatives with a finite difference method, for comparison
-                x_dot_test_computed  = model.differentiate(xs_test, 1)
+        # # Compute derivatives with a finite difference method, for comparison
+        x_dot_test_computed  = best_model.differentiate(xs_test)
 
-                # Compare SINDy-predicted derivatives with finite difference derivatives
-                # Predict derivatives using the learned model
-                x_dot_test_predicted  = model.predict(xs_test, u=du_test)
+        # Compare SINDy-predicted derivatives with finite difference derivatives
+        # Predict derivatives using the learned model
+        x_dot_test_predicted  = best_model.predict(xs_test, u=du_test)
 
-                fig, axs = plt.subplots(xs_test.shape[1], 1, sharex=True, figsize=(7, 9))
-                axs.plot(x_dot_test_computed[:, 0], "k", label="numerical derivative")
-                axs.plot(x_dot_test_predicted[:, 0], "r--", label="model prediction")
-                axs.legend()
-                axs.set(xlabel="t", ylabel=r"$\dot x_{}$".format(0))
-                plt.show()
+        fig, axs = plt.subplots(xs_test.shape[1], 1, sharex=True, figsize=(7, 9))
+        axs.plot(x_dot_test_computed[:, 0], "k", label="numerical derivative")
+        axs.plot(x_dot_test_predicted[:, 0], "r--", label="model prediction")
+        axs.legend()
+        axs.set(xlabel="t", ylabel=r"$\dot x_{}$".format(0))
+        fig.show()
 
 def main():
     tmin = 11000
