@@ -206,32 +206,6 @@ class Model(ET):
         super().__init__(path, tmin, tmax, normalized)
         self.df = super().data_conditioning()
 
-    def optimizer(self, name):
-        optimizer_ = None
-        if name == 'SSR':
-            optimizer_ = ps.SSR(
-            alpha=0.01,
-            normalize_columns=True,
-            max_iter=20,
-        )
-        if name == 'SR3':
-            optimizer_ = ps.ConstrainedSR3(
-                threshold=0.01,
-                nu=2,
-                thresholder="l1",
-                trimming_fraction=0,
-                max_iter=30,
-                tol=1e-8,
-            )
-        if name == 'STLSQ':
-            optimizer_ = ps.STLSQ(
-            threshold=0.01,
-            fit_intercept=False,
-            alpha=0.01,
-        )
-        
-        return optimizer_
-
     def identify_y(self):
         def func(X, a, b, c):
             x, y, z = X
@@ -256,66 +230,74 @@ class Model(ET):
 
     def identify_model(self):
 
-        opts = ['SSR', 'SR3', 'STLSQ']
-        x_train, x_test = train_test_split(self.df, train_size=0.8, shuffle=True)
+        # Input Training data
+        du_train = self.df.loc[:,["d", "u"]].to_numpy()
+        u_train = self.df.loc[:,["u"]].to_numpy()
+        
+        # Training time
+        t_timestamp = self.df.loc[:,["t"]].to_numpy()
+        t_train = np.arange(0, len(t_timestamp), 1)        
 
-        # Entrada: Dados de Teste e Treinamento
-        du_train = x_train.loc[:,["d", "u"]].to_numpy()
-        du_test = x_test.loc[:,["d", "u"]].to_numpy()
+        # State training data
+        xs_train =  self.df.loc[:,["x"]].to_numpy()
 
-        # X: Dados de Treinamento e Teste
-        xs_train =  x_train.loc[:,["x"]].to_numpy()
-        xs_test = x_test.loc[:,["x"]].to_numpy()
+        # Scan over the number of integration points and the number of subdomains
+        n = 10
+        errs = np.zeros((n))
+        K_scan = np.linspace(20, 3000, n, dtype=int)
+        library_functions = [lambda x: x, lambda x: x * x, lambda x, y: x * y]
+        library_function_names = [lambda x: x, lambda x: x + x, lambda x, y: x + y]
+        for i, K in enumerate(K_scan):
 
-        # Initialize custom SINDy library so that we can have x_dot inside it.
-        library_functions = [
-            lambda x : np.exp(-x),
-            lambda x : x,
-        ]
+            ode_lib = ps.WeakPDELibrary(
+                library_functions=library_functions,
+                function_names=library_function_names,
+                spatiotemporal_grid=t_train,
+                include_bias=True,
+                is_uniform=True,
+                K=K,
+            )
+            opt = ps.SR3(
+                threshold=100,
+                thresholder="l0",
+                max_iter=1000,
+                tol=1e-1,
+                normalize_columns=True,
+            )
+            xs_dot_train_integral = ode_lib.convert_u_dot_integral(xs_train)
 
-        feature_libs = [
-            CustomLibrary(library_functions=library_functions),
-            ps.PolynomialLibrary(degree=2, include_bias=False), 
-            ps.FourierLibrary(n_frequencies=1), 
-            ps.IdentityLibrary()
-        ]
-
-        _, axs = plt.subplots(1, 1, sharex=True, figsize=(10, 10))
-        best_score = 0.
-        best_model = None
-        for opt in opts:
-            optimizer_ = self.optimizer(opt)
-            for lib in feature_libs:
-                model = ps.SINDy(
-                    feature_names = ["x", "d", "u"],
-                    optimizer=optimizer_,
-                    feature_library=lib,
-                    differentiation_method=ps.FiniteDifference(order=1)
+            # Instantiate and fit the SINDy model with the integral of xs_dot
+            model = ps.SINDy(feature_names = ["x", "d", "u"], 
+                            feature_library=ode_lib, 
+                            optimizer=opt)
+                            
+            model.fit(x=xs_train, u=du_train, t=t_train)
+            errs[i] = np.sqrt(
+                (
+                    np.sum((xs_dot_train_integral - opt.Theta_ @ opt.coef_.T) ** 2)
+                    / np.sum(xs_dot_train_integral**2)
                 )
+                / xs_dot_train_integral.shape[0]
+            )
 
-                print(opt, lib)
-                model.fit(x=xs_train, u=du_train)
-                model.print()
+        print("weak model")
+        model.print()
 
-                score = model.score(x=xs_test, u=du_test)
-                print("Model score: %f" % score)
-                print('=========================')
-                if best_score < score:
-                    best_score = score
-                    best_model = model
+        plt.title("Convergence of weak SINDy, hyperparameter scan", fontsize=12)
+        plt.plot(K_scan, errs)
+        plt.xlabel("Number of subdomains", fontsize=16)
+        plt.ylabel("Error", fontsize=16)
+        plt.show()
 
-        # # Compute derivatives with a finite difference method, for comparison
-        x_dot_test_computed  = best_model.differentiate(xs_test)
+        x0 = [12]
+        level_sim = model.simulate(x0, t_train, u_train)
+        plot_kws = dict(linewidth=2)
 
-        # Compare SINDy-predicted derivatives with finite difference derivatives
-        # Predict derivatives using the learned model
-        x_dot_test_predicted  = best_model.predict(xs_test, u=du_test)
-
-        fig, axs = plt.subplots(xs_test.shape[1], 1, sharex=True, figsize=(7, 9))
-        axs.plot(x_dot_test_computed[:, 0], "k", label="numerical derivative")
-        axs.plot(x_dot_test_predicted[:, 0], "r--", label="model prediction")
-        axs.legend()
-        axs.set(xlabel="t", ylabel=r"$\dot x_{}$".format(0))
+        fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+        axs[0].plot(t_train, xs_train[:, 0], "r", label="level", **plot_kws)
+        axs[0].plot(t_train, level_sim[:, 0], "k--", label="model", **plot_kws)
+        axs[0].legend()
+        axs[0].set(xlabel="t", ylabel="levels")
         fig.show()
 
 def main():

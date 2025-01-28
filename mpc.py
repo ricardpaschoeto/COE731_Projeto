@@ -1,7 +1,7 @@
 import do_mpc
 import numpy as np
 
-def mpc(model, weights_cost, weights_final):
+def mpc(model, weights_cost, weights_final, R):
     # Obtain an instance of the do-mpc MPC class
     # and initiate it with the model:
     setpoint = 12.2 # meters
@@ -16,12 +16,10 @@ def mpc(model, weights_cost, weights_final):
     }
     mpc_.set_param(**setup_mpc)
 
-    y = model.x
-    print(y)
-
     # Configure objective function:
-    lterm = weights_cost*((y['level'] - setpoint)**2 + (y['steam_flux'])**2) # Setpoint tracking
-    mterm = weights_final*((y['level'] - setpoint)**2 + (y['steam_flux'])**2) # Setpoint tracking
+    lterm = weights_cost * (model.x ** 2 + model.u ** 2 + model.d ** 2)
+    mterm = weights_final*(model.x ** 2 + model.u ** 2 + model.d ** 2)
+    rterm = R * 
 
     mpc_.set_objective(mterm=mterm, lterm=lterm)
     mpc_.set_rterm(water_flux = 100) # Scaling for quad. cost.
